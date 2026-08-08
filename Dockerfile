@@ -14,8 +14,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
 
 ENV EMBEDDINGS_DIR=/data/embeddings
+ENV PORT=8080
 RUN mkdir -p /data/embeddings
 
 EXPOSE 8080
 
-CMD gunicorn app:app --bind 0.0.0.0:${PORT:-8080} --workers 1 --threads 4 --timeout 120
+# Expand $PORT at container start (Railway sets PORT at runtime)
+CMD ["sh", "-c", "gunicorn app:app --bind 0.0.0.0:${PORT:-8080} --workers 1 --threads 4 --timeout 120"]
