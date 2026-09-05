@@ -161,24 +161,45 @@ def register_face():
 
 @app.post("/verify-face")
 def verify_face():
+    """Daily attendance: live selfie must match enrolled face and class (roster) photo."""
     try:
         body = request.get_json(force=True) or {}
         user_id = str(body.get("user_id") or "").strip()
         b64 = body.get("image_base64") or ""
         if not user_id or not b64:
             return jsonify({"error": "user_id and image_base64 required", "matched": False}), 400
-        path = _user_path(user_id)
-        if not path.exists():
-            return jsonify({"error": "No registered face for this user", "matched": False}), 400
-        stored = np.load(str(path))
+
+        enrolled_path = _user_path(user_id)
+        roster_path = _roster_path(user_id)
+        if not enrolled_path.exists():
+            return jsonify(
+                {"error": "No registered face for this user — register face first", "matched": False}
+            ), 400
+        if not roster_path.exists():
+            return jsonify(
+                {
+                    "error": "No class photo on file. Ask your teacher to upload your photo first.",
+                    "matched": False,
+                }
+            ), 400
+
         face = _crop_face(_decode_to_gray(b64))
-        score = _similarity(stored, face)
-        matched = score >= MATCH_THRESHOLD
+        enrolled = np.load(str(enrolled_path))
+        roster = np.load(str(roster_path))
+        score_enrolled = _similarity(enrolled, face)
+        score_roster = _similarity(roster, face)
+
+        # Must look like the enrolled selfie AND the teacher's class photo
+        matched = score_enrolled >= MATCH_THRESHOLD and score_roster >= MATCH_THRESHOLD
         return jsonify(
             {
                 "matched": bool(matched),
-                "similarity": round(score, 4),
+                "similarity": round(score_enrolled, 4),
+                "similarity_roster": round(score_roster, 4),
                 "threshold": MATCH_THRESHOLD,
+                "error": None
+                if matched
+                else "Face not matched to your class photo / registered face",
             }
         )
     except Exception as e:
