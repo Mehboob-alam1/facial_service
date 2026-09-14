@@ -1,10 +1,11 @@
 """
 Smart Campus — Face Recognition API (Railway)
 
-POST /register-roster { "user_id": "<firebase_uid>", "image_base64": "..." }  # teacher/admin
-POST /register-face   { "user_id": "<firebase_uid>", "image_base64": "..." }  # student (must match roster)
+POST /register-roster { "user_id": "<firebase_uid>", "image_base64": "..." }  # admin enrolls
+POST /register-face   { "user_id": "<firebase_uid>", "image_base64": "..." }  # legacy / heal
 POST /verify-face     { "user_id": "<firebase_uid>", "image_base64": "..." }  # daily attendance
 GET  /health
+GET  /face-status/<user_id>
 
 Flutter (Firebase Auth) sends the Firebase UID as user_id.
 """
@@ -80,7 +81,7 @@ def root():
         {
             "service": "smartcampus-face-api",
             "ok": True,
-            "endpoints": ["/health", "/register-roster", "/register-face", "/verify-face"],
+            "endpoints": ["/health", "/face-status/<user_id>", "/register-roster", "/register-face", "/verify-face"],
         }
     )
 
@@ -97,8 +98,26 @@ def health():
     )
 
 
+@app.get("/face-status/<user_id>")
+def face_status(user_id: str):
+    uid = str(user_id or "").strip()
+    if not uid:
+        return jsonify({"error": "user_id required"}), 400
+    enrolled = _user_path(uid).exists()
+    roster = _roster_path(uid).exists()
+    return jsonify(
+        {
+            "user_id": uid,
+            "enrolled": enrolled,
+            "roster": roster,
+            "ready": enrolled or roster,
+        }
+    )
+
+
 @app.post("/register-roster")
 def register_roster():
+    """Admin uploads class photo — also enrolls face for attendance."""
     try:
         body = request.get_json(force=True) or {}
         user_id = str(body.get("user_id") or "").strip()
@@ -106,17 +125,17 @@ def register_roster():
         if not user_id or not b64:
             return jsonify({"error": "user_id and image_base64 required"}), 400
         face = _crop_face(_decode_to_gray(b64))
-        np.save(str(_roster_path(user_id)), face.astype(np.uint8))
-        enrolled = _user_path(user_id)
-        if enrolled.exists():
-            enrolled.unlink()
-        return jsonify({"success": True, "message": "Roster photo saved"})
+        arr = face.astype(np.uint8)
+        np.save(str(_roster_path(user_id)), arr)
+        np.save(str(_user_path(user_id)), arr)
+        return jsonify({"success": True, "message": "Roster photo saved and face enrolled"})
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
 
 @app.post("/register-face")
 def register_face():
+    """Legacy/heal: selfie (or same admin photo) must match roster, then enrolled is saved."""
     try:
         body = request.get_json(force=True) or {}
         user_id = str(body.get("user_id") or "").strip()
@@ -171,17 +190,23 @@ def verify_face():
 
         enrolled_path = _user_path(user_id)
         roster_path = _roster_path(user_id)
-        if not enrolled_path.exists():
-            return jsonify(
-                {"error": "No registered face for this user — register face first", "matched": False}
-            ), 400
-        if not roster_path.exists():
+
+        # Heal: admin-only enroll uses roster as the template
+        if not enrolled_path.exists() and roster_path.exists():
+            np.save(str(enrolled_path), np.load(str(roster_path)))
+
+        if not roster_path.exists() and not enrolled_path.exists():
             return jsonify(
                 {
-                    "error": "No class photo on file. Ask your teacher to upload your photo first.",
+                    "error": "No registered face for this user — ask admin to upload class photo",
                     "matched": False,
                 }
             ), 400
+
+        if not roster_path.exists():
+            roster_path = enrolled_path
+        if not enrolled_path.exists():
+            enrolled_path = roster_path
 
         face = _crop_face(_decode_to_gray(b64))
         enrolled = np.load(str(enrolled_path))
@@ -189,7 +214,6 @@ def verify_face():
         score_enrolled = _similarity(enrolled, face)
         score_roster = _similarity(roster, face)
 
-        # Must look like the enrolled selfie AND the teacher's class photo
         matched = score_enrolled >= MATCH_THRESHOLD and score_roster >= MATCH_THRESHOLD
         return jsonify(
             {
